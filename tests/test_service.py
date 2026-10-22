@@ -70,6 +70,41 @@ class ServiceTests(unittest.TestCase):
         self.assertTrue(by_id[ROOT_ID]["error_evidence"]["latest_failed"])
         self.assertNotIn("TEST-SECRET-CIPHER", json.dumps(result))
 
+    def test_already_cipher_free_history_with_provider_ids_can_be_repaired(self):
+        self.clean((ROOT_ID,))
+        path = self.service.catalog.source(ROOT_ID)
+        records = [json.loads(line) for line in path.read_bytes().splitlines()]
+        provider_id = "msg_0d0c568e89685e2c006ad9dfc058948197857f12380356f4da"
+        message = next(row for row in records if row["type"] == "response_item" and
+                       row["payload"].get("type") == "message" and row["payload"].get("role") == "assistant")
+        message["payload"]["id"] = provider_id
+        raw = [(json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8") for row in records]
+        path.write_bytes(b"".join(raw))
+        offsets, size = {}, 0
+        for row, line in zip(records, raw):
+            offsets[row["ordinal"]] = size
+            size += len(line)
+        import sqlite3
+        con = sqlite3.connect(self.home / "thread_history_1.sqlite")
+        con.execute("UPDATE thread_history_projection_state SET next_rollout_byte_offset=? WHERE thread_id=?", (size, ROOT_ID))
+        for row in con.execute("SELECT turn_id,rollout_ordinal,rollout_end_ordinal FROM thread_turns WHERE thread_id=?", (ROOT_ID,)).fetchall():
+            end_offset = size if row[2] == records[-1]["ordinal"] else offsets[row[2] + 1]
+            con.execute("UPDATE thread_turns SET rollout_byte_offset=?,rollout_end_byte_offset=? WHERE thread_id=? AND turn_id=?",
+                        (offsets[row[1]], end_offset, ROOT_ID, row[0]))
+        con.commit(); con.close()
+        inspection = self.inspect()
+        root = next(node for node in inspection["nodes"] if node["id"] == ROOT_ID)
+        self.assertEqual(root["encrypted_blocks"], 0)
+        self.assertEqual(root["server_item_ids"], 1)
+        self.assertTrue(root["ready"])
+        result = wait(self.service, self.service.clean(inspection["inspection_id"], [ROOT_ID]))
+        self.assertEqual(result["state"], "succeeded", result)
+        candidate = [json.loads(line) for line in path.read_bytes().splitlines()]
+        message_after = next(row for row in candidate if row["type"] == "response_item" and
+                             row["payload"].get("type") == "message" and row["payload"].get("role") == "assistant")
+        self.assertNotIn("id", message_after["payload"])
+        self.assertEqual(message_after["payload"], {k:v for k,v in message["payload"].items() if k != "id"})
+
     def test_group_clean_and_restore_preserve_visible_items_and_unselected_files(self):
         original_files, before_indexes = self.all_files(), self.indexes()
         backup = self.clean()

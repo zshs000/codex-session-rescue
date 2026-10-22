@@ -26,6 +26,7 @@ from pathlib import Path
 import sqlite3
 import sys
 import uuid
+from replay_items import normalize_history
 
 
 KEYS = {
@@ -253,6 +254,8 @@ def build_candidate(original, thread_id):
                     "Unexpected top-level record removal.")
             counts["removed_rollout_records"] += 1
             continue
+        cleaned, detached = normalize_history(cleaned)
+        counts["detached_server_item_ids"] += detached
         ordinals[old_ordinal] = len(parts)
         cleaned["ordinal"] = len(parts)
         if cleaned["ordinal"] != record["ordinal"]:
@@ -266,7 +269,7 @@ def build_candidate(original, thread_id):
     require(encrypted_count(candidate.records) == 0, "Encrypted content remains in the candidate.")
     # Visible events, messages, and tool I/O are separate from opaque responses.
     def visible_records(rollout):
-        return [{k: v for k, v in r.items() if k != "ordinal"} for r in rollout.records
+        return [{k: v for k, v in normalize_history(r)[0].items() if k != "ordinal"} for r in rollout.records
                 if r.get("type") not in {"response_item", "compacted"}
                 or (r.get("type") == "response_item" and r.get("payload", {}).get("type") not in {"reasoning", "agent_message"})]
     require(visible_records(original) == visible_records(candidate), "Readable messages, events, or tool data changed.")
@@ -358,7 +361,8 @@ def make_plan(home, thread_id, catalog_entries=None):
 def prepare(home, thread_id):
     plan = make_plan(home, thread_id)
     summary, original, candidate, before, after, metadata = plan
-    require(summary["encrypted_fields_before"] > 0, "This thread already has no nonempty encrypted fields.")
+    require(summary["encrypted_fields_before"] > 0 or summary["transformations"].get("detached_server_item_ids", 0),
+            "This thread already has no encrypted fields or provider item IDs.")
     stamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
     backup = home / "backups_state" / f"encrypted-repair-{thread_id}-{stamp}"
     backup.mkdir(parents=True, exist_ok=False)

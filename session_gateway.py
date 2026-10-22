@@ -14,6 +14,7 @@ import uuid
 
 import repair_encrypted_session as engine
 from session_catalog import SessionCatalog
+from replay_items import detach_replay_item
 
 LOG = logging.getLogger("codex-session-repair")
 MAX_BODY = 64 * 1024 * 1024
@@ -127,13 +128,15 @@ def filter_request(body):
     engine.require(isinstance(body, dict), "Responses 请求必须是 JSON 对象。")
     engine.require(not body.get("previous_response_id"),
                    "此请求使用服务端历史引用，请通过页面提供的 HTTP 恢复命令重新打开会话。")
-    result, counts = dict(body), {"removed": 0}
+    result, counts = dict(body), {"removed": 0, "detached": 0}
     inputs = body.get("input")
     if isinstance(inputs, list):
         result["input"] = []
         for item in inputs:
             filtered = filter_input_item(item, counts)
             if filtered is not DROP:
+                filtered, detached = detach_replay_item(filtered)
+                counts["detached"] += detached
                 result["input"].append(filtered)
     elif inputs is not None:
         engine.require(isinstance(inputs, str), "Responses input 格式尚不支持。")
@@ -278,7 +281,7 @@ class SessionGateway:
             removed = 0
             if matched:
                 filtered, removed = filter_request(body)
-                if removed:
+                if filtered != body:
                     raw = json.dumps(filtered, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             upstream = urlsplit(rule["upstream_url"])
             path = upstream.path.rstrip("/") + suffix

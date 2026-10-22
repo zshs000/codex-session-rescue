@@ -181,6 +181,17 @@ class GatewayTests(unittest.TestCase):
         self.assertNotIn("FAKE-TEST-KEY", saved)
         self.assertNotIn("SECRET", saved)
 
+    def test_relay_serializes_detached_call_ids_when_cipher_was_already_cleaned(self):
+        gateway = self.enable()
+        self.finish_stream.set()
+        raw = b'{"input":[{"type":"function_call","id":"fc_bound","call_id":"call_stable","name":"save","arguments":"{}"},{"type":"function_call_output","call_id":"call_stable","output":"ok"}]}'
+        connection, response = self.proxy(gateway, ROOT_ID, raw)
+        self.assertEqual(response.status, 200)
+        response.read(); connection.close()
+        forwarded = json.loads(self.received[-1]["body"])
+        self.assertNotIn("id", forwarded["input"][0])
+        self.assertEqual(forwarded["input"][0]["call_id"], forwarded["input"][1]["call_id"])
+
     def test_other_threads_missing_id_and_disabled_rule_preserve_exact_body(self):
         gateway = self.enable()
         self.finish_stream.set()

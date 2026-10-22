@@ -19,6 +19,7 @@ import zipfile
 import repair_encrypted_session as engine
 import repair_split_encrypted_session as split
 from session_catalog import SessionCatalog, explain_error, physical_id, safe_text
+from replay_items import normalize_history
 
 LOG = logging.getLogger("codex-session-repair")
 
@@ -136,14 +137,16 @@ class RepairService:
                            records=len(item["before_records"]), repaired_records=len(item["after_records"]))
         descriptor = {"files": [(str(f["path"]), engine.digest(f["before"])) for f in files],
                       "index": tables_hash(before), "metadata": metadata}
-        public = {"id": identity, "ready": summary["encrypted_fields_before"] > 0,
+        detached_ids = sum(normalize_history(record)[1] for item in files for record in item["before_records"])
+        public = {"id": identity, "ready": summary["encrypted_fields_before"] > 0 or detached_ids > 0,
+                  "server_item_ids": detached_ids,
                   "encrypted_blocks": summary["encrypted_fields_before"], "segments": segments,
                   "segment_count": len(segments), "visible_turns": counts["thread_turns"], "visible_items": counts["thread_items"],
                   "bytes_before": sum(len(f["before"]) for f in files), "bytes_after": sum(len(f["after"]) for f in files),
                   "removed_records": sum(len(f["before_records"]) - len(f["after_records"]) for f in files),
                   "index_verified": True, "readable_history_preserved": True,
                   "error_evidence": self.catalog.error_info(identity),
-                  "reason": "" if summary["encrypted_fields_before"] else "没有发现需要清理的加密内容。"}
+                  "reason": "" if summary["encrypted_fields_before"] or detached_ids else "没有发现需要清理的加密内容或厂商条目引用。"}
         return {"public": public, "files": files, "before": before, "after": after, "metadata": metadata,
                 "fingerprint": engine.digest(engine.canonical(descriptor).encode("utf-8"))}
 

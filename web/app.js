@@ -222,6 +222,7 @@ function renderThread() {
   const focused = nodes.find((n) => n.id === state.focused) || root;
   const selected = nodes.filter((n) => state.checked.has(n.id) && n.ready);
   const encrypted = selected.reduce((sum, n) => sum + n.encrypted_blocks, 0);
+  const serverIds = selected.reduce((sum, n) => sum + (n.server_item_ids || 0), 0);
   const checkButton = button(state.inspection ? "重新检查" : "检查会话", startInspection, "primary");
   checkButton.id = "inspectButton";
   setContent(
@@ -242,8 +243,8 @@ function renderThread() {
     gatewayPanel(), treePanel(nodes), segmentPanel(focused),
     state.inspection ? h("section", { class: "selection-bar" },
       h("div", {}, h("strong", {}, `已选择 ${selected.length} 条会话${selected.some((n) => n.is_subagent) ? `，含 ${selected.filter((n) => n.is_subagent).length} 个子代理` : ""}`),
-        h("p", {}, `将清理 ${num(encrypted)} 个加密块，并同步历史引用和索引。`, h("br"), "开始前自动保存原文件与索引快照。")),
-      h("div", { class: "actions-right" }, button("备份并清理", startClean, "primary", { id: "cleanButton", disabled: state.busy || !selected.length || !encrypted }),
+        h("p", {}, `将清理 ${num(encrypted)} 个加密块、${num(serverIds)} 个厂商条目引用，并同步历史引用和索引。`, h("br"), "开始前自动保存原文件与索引快照。")),
+      h("div", { class: "actions-right" }, button("备份并清理", startClean, "primary", { id: "cleanButton", disabled: state.busy || !selected.length || !(encrypted + serverIds) }),
         h("small", {}, "完成后重新打开对应会话"))) : null);
 }
 async function refreshGateway(identity = state.selected?.id) {
@@ -319,7 +320,7 @@ function commandBox(identity) {
 function startClean() {
   const selected = [...state.checked];
   runJob("/api/clean", { inspection_id: state.inspection.inspection_id, thread_ids: selected }, async (result) => {
-    for (const node of state.inspection.nodes) if (selected.includes(node.id)) { node.ready = false; node.encrypted_blocks = 0; node.cleaned = true; node.reason = "清理完成。"; }
+    for (const node of state.inspection.nodes) if (selected.includes(node.id)) { node.ready = false; node.encrypted_blocks = 0; node.server_item_ids = 0; node.cleaned = true; node.reason = "清理完成。"; }
     state.checked.clear();
     const identity = selected.includes(state.selected.id) ? state.selected.id : selected[0];
     notice(`清理完成。已处理 ${result.backup.roots.length} 条会话，备份和索引校验通过。\n退出原会话后重新打开，再发条消息确认服务端是否恢复。`, true,

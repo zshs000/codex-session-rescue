@@ -24,7 +24,7 @@ from session_catalog import explain_error
 from session_gateway import SessionGateway, upstream_url
 
 APP_ID = "codex-session-repair"
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 ASSETS = Path(__file__).resolve().parent / "web"
 LOG = logging.getLogger(APP_ID)
 

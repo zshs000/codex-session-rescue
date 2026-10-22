@@ -10,6 +10,7 @@ import re
 import sqlite3
 import sys
 import uuid
+from replay_items import normalize_history
 
 import repair_encrypted_session as common
 
@@ -200,6 +201,8 @@ def plan(home, thread_id, catalog_entries=None):
             if cleaned is common.DROP:
                 counts["removed_rollout_reasoning_records"] += 1
                 continue
+            cleaned, detached = normalize_history(cleaned)
+            counts["detached_server_item_ids"] += detached
             if local == 0 and new_base:
                 cleaned["payload"]["history_base"] = new_base
             new_ordinal = new_start + len(parts)
@@ -218,7 +221,7 @@ def plan(home, thread_id, catalog_entries=None):
         require(common.encrypted_count(candidate["records"]) == 0, "Encrypted content remains in a segment.")
         validate(candidate, new_tables, identity)
         def protected(records):
-            return [{k: v for k, v in row.items() if k != "ordinal"} for row in records
+            return [{k: v for k, v in normalize_history(row)[0].items() if k != "ordinal"} for row in records
                     if row.get("type") not in {"session_meta", "compacted"}
                     and not (row.get("type") == "response_item" and row.get("payload", {}).get("type") in {"reasoning", "agent_message"})]
         require(protected(segment["records"]) == protected(candidate["records"]), "Visible events, messages or tool data changed.")
@@ -237,7 +240,8 @@ def plan(home, thread_id, catalog_entries=None):
 
 def prepare(home, thread_id):
     summary, chain, transformed, before, after, metadata = plan(home, thread_id)
-    require(summary["encrypted_fields_before"] > 0, "This history is already clean.")
+    require(summary["encrypted_fields_before"] > 0 or summary["transformations"].get("detached_server_item_ids", 0),
+            "This history is already clean.")
     backup = home / "backups_state" / ("encrypted-split-repair-" + thread_id + "-" + datetime.now().strftime("%Y%m%dT%H%M%S%f"))
     (backup / "original").mkdir(parents=True)
     (backup / "repaired").mkdir()
