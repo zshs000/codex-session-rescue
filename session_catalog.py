@@ -173,7 +173,8 @@ def explain_error(error):
     message = str(error)
     rules = [
         (("database is locked", "database table is locked"), "历史索引正被其他进程使用，请稍后重试。"),
-        (("writer lock", "Sharing violation", "Permission denied"), "会话正在被占用。退出这条会话及所选子代理后，重新检查。"),
+        (("writer lock", "Sharing violation", "WinError 32", "WinError 33"), "会话正在被占用。退出这条会话及所选子代理后，重新检查。"),
+        (("Permission denied", "WinError 5"), "读取或替换文件时被拒绝访问，请检查文件权限；详情见本地日志。"),
         (("not at EOF", "not at EOF", "projection is not at EOF"), "历史索引尚未追上文件，暂不能安全清理。请先关闭并重新打开该会话，再检查。"),
         (("Non-contiguous", "not contiguous"), "历史记录的序号不连续，需要先修复结构，工具不会直接删除内容。"),
         (("history base", "shares this history", "shared history", "Another thread"), "其他会话也引用了这段历史，暂不能单独修改，以免影响关联会话。"),

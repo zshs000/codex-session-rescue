@@ -6,6 +6,7 @@ from contextlib import ExitStack
 from datetime import datetime
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -18,6 +19,8 @@ import zipfile
 import repair_encrypted_session as engine
 import repair_split_encrypted_session as split
 from session_catalog import SessionCatalog, explain_error, physical_id, safe_text
+
+LOG = logging.getLogger("codex-session-repair")
 
 
 def now():
@@ -160,6 +163,7 @@ class RepairService:
                     fingerprints[node["id"]] = plan["fingerprint"]
                     del plan
                 except Exception as error:
+                    LOG.warning("Inspection failed for %s: %s", node["id"], error)
                     try:
                         segments = self._skeleton(node["id"], entries)
                     except Exception:
@@ -202,6 +206,32 @@ class RepairService:
             update(.95, "核对文件哈希、引用和索引")
             return {"backup": self._public_backup(bundle), "threads": [nodes[key] for key in selected]}
         return self.jobs.submit("clean", run)
+
+    def enable_gateway(self, gateway, identity, provider_id, upstream, include_children=False):
+        """Back up and clean the explicitly selected scope before enabling its rule."""
+        from session_gateway import upstream_url
+        upstream = upstream_url(upstream)
+        family = self.catalog.family(identity)
+        nodes = family["nodes"] if include_children else family["nodes"][:1]
+        engine.require(len(nodes) <= 128, "关联会话较多，请选择一个子代理分支单独开启。")
+        engine.require(isinstance(provider_id, str) and provider_id and
+                       all(char.isalnum() or char in "_-" for char in provider_id), "厂商配置名称无效。")
+        def run(update):
+            update(.1, "正在检查当前会话的文件与索引")
+            entries, plans = split.catalog(self.home), []
+            for index, node in enumerate(nodes):
+                update(.1 + .2 * index / len(nodes), f"正在检查 {index + 1}/{len(nodes)}：{node['title'][:45]}")
+                plans.append(self._plan(node["id"], entries))
+            update(.3, "正在保存所选会话的原文件与索引备份")
+            bundle = self._prepare_bundle(plans, {node["id"]: node for node in nodes})
+            del plans
+            update(.5, "备份已保存，正在清理当前会话")
+            self._write_bundle(bundle, "apply")
+            self.catalog.loaded_at = 0
+            update(.9, "文件与索引校验通过，正在开启代理规则")
+            gateway.enable(identity, provider_id, upstream, bundle["folder"].name, include_children)
+            return {"thread_id": identity, "backup": self._public_backup(bundle)}
+        return self.jobs.submit("enable_gateway", run)
 
     def _prepare_bundle(self, plans, nodes):
         identity = "tool-" + datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8]

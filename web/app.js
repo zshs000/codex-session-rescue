@@ -2,7 +2,8 @@
 
 const $ = (id) => document.getElementById(id);
 const state = { token: "", tab: "sessions", sessions: [], total: 0, selected: null, family: null, inspection: null,
-  checked: new Set(), focused: null, includeChildren: true, busy: false, backups: [], querySeq: 0 };
+  checked: new Set(), focused: null, includeChildren: true, busy: false, backups: [], querySeq: 0, gateway: null,
+  gatewayIncludeChildren: true, gatewayUpstream: "", gatewayProvider: "" };
 let searchTimer, toastTimer;
 
 function h(tag, props = {}, ...children) {
@@ -116,11 +117,12 @@ function renderSessions(loading = false) {
 }
 async function selectThread(identity) {
   if (state.busy) return;
-  clearNotice(); state.inspection = null; state.checked.clear(); state.focused = identity;
+  clearNotice(); state.inspection = null; state.checked.clear(); state.focused = identity; state.gateway = null;
   try {
     const family = await api(`/api/sessions/${encodeURIComponent(identity)}`);
     state.family = family; state.selected = family.thread; state.includeChildren = true;
     state.tab = "sessions"; updateTabs(); render(); renderSessions();
+    await refreshGateway(identity);
     $("workspace").scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (error) { notice(error.message); }
 }
@@ -237,12 +239,71 @@ function renderThread() {
       stat("当前会话加密块", state.inspection ? root.encrypted_blocks : "待检查", state.inspection && root.encrypted_blocks != null ? "个" : "", "存在加密内容不等于已损坏")),
     h("div", { class: "info-band" }, h("span", { class: "info-symbol", "aria-hidden": "true" }, "i"),
       h("span", {}, h("strong", {}, "只清理正在报错的会话。"), " 正常回复也会生成加密内容。本工具能检查结构和历史报错，无法离线判断某段密文是否失效。")),
-    treePanel(nodes), segmentPanel(focused),
+    gatewayPanel(), treePanel(nodes), segmentPanel(focused),
     state.inspection ? h("section", { class: "selection-bar" },
       h("div", {}, h("strong", {}, `已选择 ${selected.length} 条会话${selected.some((n) => n.is_subagent) ? `，含 ${selected.filter((n) => n.is_subagent).length} 个子代理` : ""}`),
         h("p", {}, `将清理 ${num(encrypted)} 个加密块，并同步历史引用和索引。`, h("br"), "开始前自动保存原文件与索引快照。")),
       h("div", { class: "actions-right" }, button("备份并清理", startClean, "primary", { id: "cleanButton", disabled: state.busy || !selected.length || !encrypted }),
         h("small", {}, "完成后重新打开对应会话"))) : null);
+}
+async function refreshGateway(identity = state.selected?.id) {
+  if (!identity) return;
+  const info = await api(`/api/gateway/${encodeURIComponent(identity)}`);
+  if (state.selected?.id === identity) {
+    state.gateway = info; state.gatewayUpstream = info.upstream_url || "";
+    state.gatewayProvider = info.provider_id || "custom";
+    state.gatewayIncludeChildren = info.include_children ?? true; render();
+  }
+}
+function gatewayPanel() {
+  const gateway = state.gateway;
+  if (!gateway) return null;
+  const upstream = h("input", { id: "gatewayUpstream", type: "url", value: state.gatewayUpstream,
+    placeholder: "https://你的厂商地址/v1", disabled: state.busy || gateway.enabled,
+    oninput: (event) => { state.gatewayUpstream = event.target.value; } });
+  const provider = h("input", { id: "gatewayProvider", value: state.gatewayProvider,
+    disabled: state.busy || gateway.enabled, oninput: (event) => { state.gatewayProvider = event.target.value; } });
+  return h("section", { class: "panel gateway-panel" },
+    h("div", { class: "panel-header" }, h("div", {}, h("h2", {}, "当前会话代理"),
+      h("p", {}, "先备份并清理，再过滤当前会话后续请求中的密文。可同时覆盖它的子代理。")),
+      badge(gateway.enabled ? (gateway.connected ? "已接入" : "已开启，等待接入") : "未开启", gateway.enabled ? "green" : "gray")),
+    h("div", { class: "panel-body" },
+      h("div", { class: "gateway-fields" }, h("label", {}, "原厂商 API URL", upstream),
+        h("label", {}, "Codex 厂商配置名称", provider)),
+      h("label", { class: "check-label gateway-scope" }, h("input", { id: "gatewayIncludeChildren", type: "checkbox",
+        checked: state.gatewayIncludeChildren, disabled: state.busy || gateway.enabled,
+        onchange: (event) => { state.gatewayIncludeChildren = event.target.checked; } }),
+        "一并处理子代理，包括后续新建的子代理"),
+      gateway.proxy_url ? h("div", { class: "gateway-address" }, "此会话的代理 API URL", commandText(gateway.proxy_url)) : null,
+      gateway.enabled ? h("div", { class: "gateway-detail" },
+        h("p", {}, "退出原会话，用下面的命令重新打开，后续请求才会经过代理。保持本工具运行。"),
+        commandText(gateway.resume_command),
+        h("p", {}, `已匹配 ${num(gateway.filtered_requests)} 次请求，移除 ${num(gateway.removed)} 个加密块。`),
+        gateway.last_error ? h("p", { class: "gateway-error" }, gateway.last_error) : null) :
+        h("p", { class: "gateway-detail" }, "填写这条会话原来发送请求的 URL。开始前退出这条会话；开启后页面会给出接入命令。"),
+      h("div", { class: "button-group" }, gateway.enabled ?
+        button("关闭密文过滤", disableGateway, "secondary") : button("备份、清理并开启代理", enableGateway, "primary"),
+        button("刷新代理状态", () => refreshGateway().catch((error) => notice(error.message)), "quiet"))));
+}
+function commandText(text) {
+  return h("div", { class: "command-box" }, h("code", {}, text), button("复制", () => copy(text), "copy-button"));
+}
+function enableGateway() {
+  const threadId = state.selected.id;
+  const upstream = $("gatewayUpstream").value.trim(), provider = $("gatewayProvider").value.trim();
+  runJob("/api/gateway/enable", { thread_id: threadId, upstream_url: upstream, provider_id: provider,
+    include_children: state.gatewayIncludeChildren }, async () => {
+    state.inspection = null; state.checked.clear();
+    await refreshGateway(threadId);
+    notice("当前会话已备份并清理。请用代理面板中的命令重新打开这条会话，接入后会显示请求统计。", true);
+    await search();
+  });
+}
+async function disableGateway() {
+  try {
+    await api("/api/gateway/disable", { thread_id: state.selected.id });
+    await refreshGateway(); toast("已关闭这条会话的密文过滤，原厂商转发继续保留。");
+  } catch (error) { notice(error.message); }
 }
 function startInspection() {
   runJob("/api/inspect", { thread_id: state.selected.id, include_children: state.includeChildren }, async (result) => {

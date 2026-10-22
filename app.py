@@ -21,9 +21,10 @@ import webbrowser
 import repair_encrypted_session as engine
 from repair_service import RepairService
 from session_catalog import explain_error
+from session_gateway import SessionGateway, upstream_url
 
 APP_ID = "codex-session-repair"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 ASSETS = Path(__file__).resolve().parent / "web"
 LOG = logging.getLogger(APP_ID)
 
@@ -35,6 +36,7 @@ class LocalServer(ThreadingHTTPServer):
         self.service = RepairService(home)
         self.data_dir = Path(data_dir).resolve()
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.gateway = SessionGateway(home, self.data_dir)
         self.token = secrets.token_urlsafe(32)
         self.nonce = secrets.token_hex(16)
         super().__init__(("127.0.0.1", port), Handler)
@@ -104,6 +106,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(raw)
                 return
             service = self.server.service
+            if path.startswith("/gateway/"):
+                self.server.gateway.relay(self)
+                return
             if path == "/api/health":
                 self.send_json({"app": APP_ID, "version": VERSION, "nonce": self.server.nonce})
             elif path == "/api/bootstrap":
@@ -120,6 +125,10 @@ class Handler(BaseHTTPRequestHandler):
             elif path.startswith("/api/sessions/"):
                 identity = path.removeprefix("/api/sessions/")
                 self.send_json(service.catalog.family(identity))
+            elif path.startswith("/api/gateway/"):
+                identity = path.removeprefix("/api/gateway/")
+                self.send_json({**self.server.gateway.defaults(identity, service.catalog),
+                                **self.server.gateway.public(identity, self.server.url)})
             elif path.startswith("/api/jobs/"):
                 self.send_json(service.jobs.get(path.removeprefix("/api/jobs/")))
             elif path == "/api/backups":
@@ -155,6 +164,10 @@ class Handler(BaseHTTPRequestHandler):
             self.reject("读取失败，详情已写入本地日志。", 500)
 
     def do_POST(self):
+        if urlsplit(self.path).path.startswith("/gateway/"):
+            if self.validate_request():
+                self.server.gateway.relay(self)
+            return
         if not self.validate_request(mutation=True):
             return
         path = urlsplit(self.path).path
@@ -170,6 +183,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(service.inspect(data["thread_id"], data.get("include_children", True) is True), 202)
             elif path == "/api/clean":
                 self.send_json(service.clean(data.get("inspection_id"), data.get("thread_ids")), 202)
+            elif path == "/api/gateway/enable":
+                upstream = upstream_url(data.get("upstream_url"))
+                engine.require(upstream not in self.server.allowed_origins and
+                               not upstream.startswith(self.server.url + "/"), "上游 URL 应填写原厂商地址，不能指向本工具。")
+                self.send_json(service.enable_gateway(self.server.gateway, data.get("thread_id"),
+                                                      data.get("provider_id"), upstream,
+                                                      data.get("include_children", False) is True), 202)
+            elif path == "/api/gateway/disable":
+                self.server.gateway.disable(data.get("thread_id"))
+                self.send_json({"enabled": False})
             elif path.startswith("/api/backups/") and path.rsplit("/", 1)[-1] in {"restore", "recover"}:
                 identity, action = path[len("/api/backups/"):].rsplit("/", 1)
                 self.send_json(service.restore(identity, recover=action == "recover"), 202)
@@ -256,7 +279,17 @@ def main():
                     return
                 time.sleep(.25)
             raise RuntimeError("Another instance is starting. Please retry shortly.")
-        server = LocalServer(args.home, args.data_dir, args.port)
+        port_file = args.data_dir / "server-port.json"
+        saved_port = args.port
+        if not saved_port and port_file.exists():
+            saved_port = int(engine.read_json(port_file)["port"])
+        try:
+            server = LocalServer(args.home, args.data_dir, saved_port)
+        except OSError:
+            if args.port:
+                raise
+            server = LocalServer(args.home, args.data_dir, 0)
+        engine.save_json(port_file, {"port": server.server_address[1]})
         engine.save_json(runtime, {"port": server.server_address[1], "pid": os.getpid(), "nonce": server.nonce, "home": str(server.service.home)})
         LOG.info("Started %s", server.url)
         if sys.stdout:
