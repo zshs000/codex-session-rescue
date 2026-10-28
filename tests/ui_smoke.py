@@ -44,6 +44,21 @@ with sync_playwright() as p:
     page.set_default_timeout(15000)
     try:
         page.goto(runtime["url"], wait_until="networkidle")
+        expect(page.get_by_role("heading", name="请求经过，ID 自动清理。")).to_be_visible()
+        expect(page.locator("#automaticStatus")).to_contain_text("尚未接入")
+        expect(page.locator("#automaticIds")).to_be_checked()
+        expect(page.locator("#automaticEncrypted")).not_to_be_checked()
+        page.screenshot(path=str(ARTIFACTS / "ui-automatic.png"), full_page=True)
+        page.locator("#automaticUpstream").fill("https://vendor.example/v1")
+        with page.expect_response(lambda response: response.url.endswith("/api/automatic")):
+            pass
+        expect(page.locator("#automaticUpstream")).to_have_value("https://vendor.example/v1")
+        expect(page.locator("#automaticUpstream")).to_be_focused()
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.screenshot(path=str(ARTIFACTS / "ui-automatic-mobile.png"), full_page=True)
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1"), "Automatic guard overflows at narrow width"
+        page.set_viewport_size({"width": 1440, "height": 1100})
+        page.locator("#sessionsTab").click()
         expect(page.get_by_role("heading", name="选择一条需要修复的会话")).to_be_visible()
         page.screenshot(path=str(ARTIFACTS / "ui-welcome.png"), full_page=True)
         page.locator("#searchInput").fill("codex resume " + ROOT_ID)
@@ -96,7 +111,8 @@ with sync_playwright() as p:
         assert not errors, errors
         current = {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in (home / "sessions").glob("*.jsonl")}
         assert current == originals, "UI rollback must restore every original synthetic file."
-        report = {"ok": True, "search_resume_command": True, "recursive_subagents": True,
+        report = {"ok": True, "automatic_default_view": True, "automatic_polling_preserves_input_and_focus": True,
+                  "automatic_narrow_viewport_no_overflow": True, "search_resume_command": True, "recursive_subagents": True,
                   "parent_and_child_cleanup_and_rollback": True, "split_cleanup_and_rollback": True,
                   "backup_export": True, "source_files_restored_exactly": True, "narrow_viewport_no_overflow": True,
                   "browser_errors": errors, "synthetic_home": str(home)}

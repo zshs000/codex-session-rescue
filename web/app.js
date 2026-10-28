@@ -1,7 +1,7 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const state = { token: "", tab: "sessions", sessions: [], total: 0, selected: null, family: null, inspection: null,
+const state = { token: "", tab: "automatic", automatic: null, sessions: [], total: 0, selected: null, family: null, inspection: null,
   checked: new Set(), focused: null, includeChildren: true, busy: false, backups: [], querySeq: 0, gateway: null,
   gatewayIncludeChildren: true, gatewayUpstream: "", gatewayProvider: "" };
 let searchTimer, toastTimer;
@@ -60,6 +60,7 @@ async function api(path, data) {
 }
 
 function updateControls() {
+  $("automaticTab").disabled = state.busy;
   $("exitButton").disabled = state.busy; $("sessionsTab").disabled = state.busy; $("backupsTab").disabled = state.busy;
   $("searchInput").disabled = state.busy; $("kindFilter").disabled = state.busy; $("archiveFilter").disabled = state.busy;
 }
@@ -128,6 +129,8 @@ async function selectThread(identity) {
 }
 
 function updateTabs() {
+  $("layout").classList.toggle("mode-automatic", state.tab === "automatic");
+  $("automaticTab").classList.toggle("active", state.tab === "automatic");
   $("layout").classList.toggle("mode-backups", state.tab === "backups");
   $("sessionsTab").classList.toggle("active", state.tab === "sessions");
   $("backupsTab").classList.toggle("active", state.tab === "backups");
@@ -142,7 +145,8 @@ async function showBackups() {
   } catch (error) { notice(error.message); }
 }
 function render() {
-  if (state.tab === "backups") renderBackups();
+  if (state.tab === "automatic") renderAutomatic();
+  else if (state.tab === "backups") renderBackups();
   else if (!state.selected) renderWelcome();
   else renderThread();
 }
@@ -368,6 +372,84 @@ async function exportBackup(item) {
   } catch (error) { notice(error.message); }
 }
 
+function renderAutomatic() {
+  const data = state.automatic;
+  if (!data) { setContent(h("div", { class: "backups-empty" }, "正在读取自动守护…")); return; }
+  const c = data.counters;
+  setContent(
+    h("div", { class: "guard-heading" },
+      h("div", {}, h("span", { class: "eyebrow" }, "AUTOMATIC REQUEST GUARD"), h("h1", {}, "请求经过，ID 自动清理。"),
+        h("p", {}, "统一处理当前厂商入口的主会话和子代理请求。关闭网页后，守护继续运行。")),
+      h("span", { id: "automaticStatus" }, badge(data.attached ? "已接入 · 守护运行中" : data.enabled ? "运行中 · 当前配置未接入" : "尚未接入", data.attached ? "green" : "amber"))),
+    h("div", { class: "guard-stats" },
+      stat("已移除 ID", c.ids, "个", "同一个历史 ID 再次发送时，按再次移除计数"),
+      stat("经过请求", c.requests, "次", `其中 ${num(c.changed)} 次请求有清理`),
+      stat("已过滤密文", c.encrypted, "块", data.filter_encrypted ? "密文过滤已开启" : "密文保留"),
+      stat("正在转发", data.active, "个", `累计 ${num(c.errors)} 次错误或中断`)),
+    h("section", { class: "panel" },
+      h("div", { class: "panel-header" }, h("div", {}, h("h2", {}, "守护设置"), h("p", {}, "接入会备份并修改当前厂商地址。发送消息后检查请求计数；若没有增加，彻底退出 Codex 后重新打开。")),
+        button("计数归零", resetAutomatic, "secondary", { id: "resetAutomatic" })),
+      h("div", { class: "panel-body" },
+        h("div", { class: "guard-fields" },
+          h("label", {}, "原厂商 API 地址", h("input", { id: "automaticUpstream", type: "url", value: data.upstream_url, autocomplete: "off", placeholder: "https://vendor.example/v1" })),
+          h("label", {}, "网络出口", h("input", { id: "automaticNetwork", value: data.network, autocomplete: "off", placeholder: "auto / direct / http://127.0.0.1:端口" }))),
+        h("p", { class: "guard-help" }, "auto 读取当前系统代理；direct 直连；也可填写 HTTP 代理地址。"),
+        h("div", { class: "guard-switches" },
+          h("label", {}, h("input", { type: "checkbox", id: "automaticIds", checked: data.filter_ids }), h("span", {}, h("strong", {}, "自动清理 ID"), h("small", {}, "保留正文、工具参数、结果和 call_id。"))),
+          h("label", {}, h("input", { type: "checkbox", id: "automaticEncrypted", checked: data.filter_encrypted }), h("span", {}, h("strong", {}, "过滤加密推理"), h("small", {}, "用于 invalid_encrypted_content；开启后移除不透明推理状态。")))),
+        h("div", { class: "button-group" },
+          button(data.attached ? "保存设置" : "接入并开启自动守护", connectAutomatic, "primary", { id: "connectAutomatic" }),
+          data.enabled ? button("恢复原厂商直连", disconnectAutomatic, "secondary", { id: "disconnectAutomatic" }) : null),
+        h("div", { class: "gateway-address" }, `当前厂商：${data.provider_id || "未选择"}`, h("br"), "本地入口：", h("code", {}, data.proxy_url)),
+        h("p", { class: "guard-help", id: "automaticCounterNote" }, `计数自 ${date(c.reset_at)} 起累计，重启后保留。归零只重置统计和最近记录，过滤继续运行。`))),
+    h("section", { class: "panel" }, h("div", { class: "panel-header" }, h("div", {}, h("h2", {}, "最近请求"), h("p", {}, "每秒刷新。记录数量、状态和耗时。")), badge("LIVE", "green")),
+      h("div", { class: "guard-events", id: "automaticEvents" }, renderAutomaticEvents(data)))
+  );
+}
+function renderAutomaticEvents(data) {
+  return data.events.length ? data.events.map((event) => h("div", { class: "guard-event" },
+    h("span", { class: "muted" }, date(event.time)),
+    h("span", {}, `清理 ${num(event.ids)} 个 ID`, event.encrypted ? ` · ${num(event.encrypted)} 块密文` : ""),
+    badge(event.message || `HTTP ${event.status}`, event.status >= 400 || event.message ? "red" : "green"),
+    h("span", { class: "muted" }, `${event.seconds}s`))) : [h("div", { class: "guard-empty" }, "等待下一次请求经过这个入口。")];
+}
+async function refreshAutomatic() {
+  try {
+    state.automatic = await api("/api/automatic");
+    if (state.tab === "automatic") {
+      // Leave edited fields and keyboard focus intact while updating the live counters.
+      if (document.querySelector(".guard-stats")) {
+        const c = state.automatic.counters;
+        const values = [c.ids, c.requests, c.encrypted, state.automatic.active];
+        document.querySelectorAll(".guard-stats .stat-value").forEach((element, index) => { element.firstChild.textContent = num(values[index]); });
+        $("automaticEvents").replaceChildren(...renderAutomaticEvents(state.automatic));
+        const d = state.automatic;
+        $("automaticStatus").replaceChildren(badge(d.attached ? "已接入 · 守护运行中" : d.enabled ? "运行中 · 当前配置未接入" : "尚未接入", d.attached ? "green" : "amber"));
+        $("automaticCounterNote").textContent = `计数自 ${date(c.reset_at)} 起累计，重启后保留。归零只重置统计和最近记录，过滤继续运行。`;
+        document.querySelectorAll(".guard-stats .stat-foot")[1].textContent = `其中 ${num(c.changed)} 次请求有清理`;
+        document.querySelectorAll(".guard-stats .stat-foot")[3].textContent = `累计 ${num(c.errors)} 次错误或中断`;
+      } else render();
+    }
+  } catch (error) {
+    if (state.tab === "automatic") notice(`无法读取守护状态：${error.message}`);
+  }
+}
+async function connectAutomatic() {
+  try {
+    state.automatic = await api("/api/automatic/connect", { upstream_url: $("automaticUpstream").value.trim(),
+      network: $("automaticNetwork").value.trim(), filter_ids: $("automaticIds").checked, filter_encrypted: $("automaticEncrypted").checked });
+    render(); toast("配置已接入。发送消息后检查请求计数，确认会话已进入守护。");
+  } catch (error) { notice(error.message); }
+}
+async function disconnectAutomatic() {
+  try { state.automatic = await api("/api/automatic/disconnect", {}); render(); toast("已恢复原厂商配置。"); }
+  catch (error) { notice(error.message); }
+}
+async function resetAutomatic() {
+  try { state.automatic = await api("/api/automatic/reset", {}); render(); toast("计数已归零，过滤继续运行。"); }
+  catch (error) { notice(error.message); }
+}
+$("automaticTab").addEventListener("click", async () => { state.tab = "automatic"; updateTabs(); render(); await refreshAutomatic(); });
 $("searchInput").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => search(), 220); });
 $("kindFilter").addEventListener("change", () => search()); $("archiveFilter").addEventListener("change", () => search());
 $("loadMore").addEventListener("click", () => search(true));
@@ -379,10 +461,12 @@ $("exitButton").addEventListener("click", async () => {
 });
 
 async function boot() {
-  renderWelcome();
+  updateTabs(); render();
   try {
     const info = await api("/api/bootstrap"); state.token = info.token;
     $("dataHome").textContent = info.home; $("dataHome").title = info.home;
+    await refreshAutomatic();
+    setInterval(() => { if (state.tab === "automatic" && !state.busy && !document.hidden) refreshAutomatic(); }, 1000);
     if (!info.home_exists) { notice("当前目录中没有找到 Codex 会话索引。请通过启动参数 --home 指定正确的数据目录。"); return; }
     await search();
     const identity = new URLSearchParams(location.search).get("thread");

@@ -257,6 +257,7 @@ class SessionGateway:
 
     def relay(self, handler):
         """Relay raw HTTP/SSE responses; never save credentials or message bodies."""
+        from relay_transport import open_response
         parsed = urlsplit(handler.path)
         parts = parsed.path.split("/", 3)
         rule = self.route(parts[2]) if len(parts) >= 3 else None
@@ -292,10 +293,10 @@ class SessionGateway:
             headers = {key: value for key, value in handler.headers.items()
                        if key.lower() not in hop | {"x-session-token"}}
             headers["Accept-Encoding"] = "identity"
-            client = http.client.HTTPSConnection if upstream.scheme == "https" else http.client.HTTPConnection
-            connection = client(upstream.hostname, upstream.port, timeout=300)
-            connection.request("POST", path, raw, headers)
-            response = connection.getresponse()
+            url = rule["upstream_url"].rstrip("/") + suffix
+            if parsed.query:
+                url += "?" + parsed.query
+            connection, response = open_response("POST", url, headers, raw)
             self.record(rule["thread_id"], request_id, removed, matched)
             handler.send_response(response.status)
             response_hop = HOP_HEADERS | {key.strip().lower() for key in response.getheader("Connection", "").split(",")}

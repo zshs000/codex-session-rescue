@@ -22,9 +22,10 @@ import repair_encrypted_session as engine
 from repair_service import RepairService
 from session_catalog import explain_error
 from session_gateway import SessionGateway, upstream_url
+from automatic_gateway import AutomaticGateway
 
 APP_ID = "codex-session-repair"
-VERSION = "1.1.1"
+VERSION = "1.2.0"
 ASSETS = Path(__file__).resolve().parent / "web"
 LOG = logging.getLogger(APP_ID)
 
@@ -37,6 +38,7 @@ class LocalServer(ThreadingHTTPServer):
         self.data_dir = Path(data_dir).resolve()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.gateway = SessionGateway(home, self.data_dir)
+        self.automatic = AutomaticGateway(home, self.data_dir)
         self.token = secrets.token_urlsafe(32)
         self.nonce = secrets.token_hex(16)
         super().__init__(("127.0.0.1", port), Handler)
@@ -106,6 +108,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(raw)
                 return
             service = self.server.service
+            if path.startswith("/auto/v1/"):
+                self.server.automatic.relay(self)
+                return
             if path.startswith("/gateway/"):
                 self.server.gateway.relay(self)
                 return
@@ -114,6 +119,8 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/bootstrap":
                 self.send_json({"app": APP_ID, "version": VERSION, "token": self.server.token,
                                 "home": str(service.home), "home_exists": (service.home / "state_5.sqlite").is_file()})
+            elif path == "/api/automatic":
+                self.send_json(self.server.automatic.public(self.server.url))
             elif path == "/api/sessions":
                 query = parse_qs(parsed.query)
                 one = lambda key, default: query.get(key, [default])[0]
@@ -164,6 +171,10 @@ class Handler(BaseHTTPRequestHandler):
             self.reject("读取失败，详情已写入本地日志。", 500)
 
     def do_POST(self):
+        if urlsplit(self.path).path.startswith("/auto/v1/"):
+            if self.validate_request():
+                self.server.automatic.relay(self)
+            return
         if urlsplit(self.path).path.startswith("/gateway/"):
             if self.validate_request():
                 self.server.gateway.relay(self)
@@ -178,7 +189,13 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(length))
             engine.require(isinstance(data, dict), "请求内容无效。")
             service = self.server.service
-            if path == "/api/inspect":
+            if path == "/api/automatic/connect":
+                self.send_json(self.server.automatic.configure(self.server.url, data))
+            elif path == "/api/automatic/disconnect":
+                self.send_json(self.server.automatic.disconnect(self.server.url))
+            elif path == "/api/automatic/reset":
+                self.send_json(self.server.automatic.reset(self.server.url))
+            elif path == "/api/inspect":
                 engine.require(isinstance(data.get("thread_id"), str), "请选择会话。")
                 self.send_json(service.inspect(data["thread_id"], data.get("include_children", True) is True), 202)
             elif path == "/api/clean":
@@ -197,9 +214,10 @@ class Handler(BaseHTTPRequestHandler):
                 identity, action = path[len("/api/backups/"):].rsplit("/", 1)
                 self.send_json(service.restore(identity, recover=action == "recover"), 202)
             elif path == "/api/shutdown":
-                if service.jobs.busy():
+                if service.jobs.busy() or self.server.automatic.active:
                     self.reject("正在处理会话，完成后再退出工具。", 409)
                 else:
+                    self.server.automatic.disconnect(self.server.url)
                     self.send_json({"stopped": True})
                     threading.Thread(target=self.server.shutdown, daemon=True).start()
             else:
@@ -290,6 +308,7 @@ def main():
                 raise
             server = LocalServer(args.home, args.data_dir, 0)
         engine.save_json(port_file, {"port": server.server_address[1]})
+        server.automatic.reconnect(server.url)
         engine.save_json(runtime, {"port": server.server_address[1], "pid": os.getpid(), "nonce": server.nonce, "home": str(server.service.home)})
         LOG.info("Started %s", server.url)
         if sys.stdout:
