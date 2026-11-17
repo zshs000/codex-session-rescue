@@ -286,6 +286,12 @@ def main():
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     LOG.setLevel(logging.INFO)
     LOG.addHandler(handler)
+    gateway_log = logging.getLogger(APP_ID + ".gateway")
+    gateway_handler = RotatingFileHandler(args.data_dir / "gateway.log", maxBytes=5_000_000, backupCount=5, encoding="utf-8")
+    gateway_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    gateway_log.setLevel(logging.INFO)
+    gateway_log.propagate = False
+    gateway_log.addHandler(gateway_handler)
     runtime = args.data_dir / "runtime.json"
     with instance_lock(args.data_dir / "instance.lock") as acquired:
         if not acquired:

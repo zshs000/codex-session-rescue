@@ -89,6 +89,16 @@ class AutomaticTests(unittest.TestCase):
                 raw = self.rfile.read(int(self.headers["Content-Length"]))
                 fixture.received.append({"body": raw, "auth": self.headers.get("Authorization"), "path": self.path})
                 data = json.loads(raw)
+                if "test_stream" in data:
+                    payload = data["test_stream"].encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("x-request-id", "upstream-test-123")
+                    if data.get("test_truncated_length"):
+                        self.send_header("Content-Length", str(len(payload) + 50))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
                 if data.get("test_status"):
                     self.send_response(data["test_status"])
                     self.end_headers()
@@ -187,6 +197,9 @@ class AutomaticTests(unittest.TestCase):
         client.close(); self.wait_idle()
         restarted = AutomaticGateway(self.home, self.state)
         self.assertEqual(restarted.public(self.server.url)["counters"]["ids"], 2)
+        self.assertEqual(restarted.events[0]["outcome"], "completed")
+        self.assertEqual(restarted.events[0]["terminal_event"], "response.completed")
+        self.assertEqual(restarted.counters["errors"], 0)
         saved = (self.state / "automatic-gateway.json").read_text()
         self.assertNotIn("FAKE-KEY", saved)
         self.assertNotIn("SECRET", saved)
@@ -232,6 +245,45 @@ class AutomaticTests(unittest.TestCase):
         self.assertFalse(self.received)
         status, _ = self.api("/api/automatic/reset", {}, authorized=False)
         self.assertEqual(status, 403)
+
+    def test_early_eof_is_failed_even_with_http_200_and_logs_no_content(self):
+        self.connect()
+        payload = 'data: {"type":"response.output_text.delta","delta":"PRIVATE-TEXT"}\n\n'
+        with self.assertLogs("codex-session-repair.gateway", level="INFO") as logs:
+            client, response = self.relay({"stream": True, "input": [], "test_stream": payload},
+                                          thread="11111111-1111-1111-1111-111111111111")
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.read(), payload.encode())
+            client.close(); self.wait_idle()
+        event = self.server.automatic.events[0]
+        self.assertEqual(event["status"], 200)
+        self.assertEqual(event["outcome"], "missing_completed")
+        self.assertEqual(event["last_event"], "response.output_text.delta")
+        self.assertEqual(event["upstream_request_id"], "upstream-test-123")
+        self.assertEqual(event["thread_id"], "11111111-1111-1111-1111-111111111111")
+        self.assertEqual(event["bytes_received"], len(payload.encode()))
+        self.assertEqual(self.server.automatic.counters["errors"], 1)
+        self.assertNotIn("PRIVATE-TEXT", "".join(logs.output))
+        self.assertNotIn("FAKE-KEY", "".join(logs.output))
+        restarted = AutomaticGateway(self.home, self.state)
+        self.assertEqual(restarted.events[0]["outcome"], "missing_completed")
+
+    def test_terminal_protocol_failures_and_truncated_length_keep_http_status(self):
+        self.connect()
+        for kind in ("response.failed", "response.incomplete", "error"):
+            payload = 'data: ' + json.dumps({"type": kind, "error": {"code": "upstream_error", "message": "PRIVATE"}}) + '\n\n'
+            client, response = self.relay({"stream": True, "input": [], "test_stream": payload})
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.read(), payload.encode())
+            client.close(); self.wait_idle()
+            self.assertEqual(self.server.automatic.events[0]["outcome"], kind)
+        client, response = self.relay({"stream": True, "input": [], "test_stream": "data: {}\n\n", "test_truncated_length": True})
+        self.assertEqual(response.status, 200)
+        response.read(); client.close(); self.wait_idle()
+        event = self.server.automatic.events[0]
+        self.assertEqual(event["status"], 200)
+        self.assertEqual(event["exception_class"], "IncompleteRead")
+        self.assertEqual(event["failure_stage"], "upstream_read")
 
     def test_disable_restores_owned_fields_and_keeps_other_edits(self):
         self.connect()

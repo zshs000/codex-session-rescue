@@ -23,7 +23,7 @@ class FilteringTests(unittest.TestCase):
             request_thread(headers, {"prompt_cache_key": CHILD_ID})
         self.assertIsNone(request_thread({}, {"input": [{"text": ROOT_ID}]}))
 
-    def test_only_protocol_cipher_is_removed_and_readable_content_is_preserved(self):
+    def test_only_reasoning_cipher_is_removed_and_message_content_is_preserved(self):
         opaque = {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "SECRET"}
         summary = {"type": "reasoning", "id": "rs_2", "summary": [{"type": "summary_text", "text": "Keep this summary"}], "encrypted_content": "SECRET2"}
         tool = {"type": "function_call", "call_id": "tool1", "name": "save", "arguments": '{"encrypted_content":"business data"}'}
@@ -31,16 +31,14 @@ class FilteringTests(unittest.TestCase):
         message = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Keep my text"}, {"type": "encrypted_content", "encrypted_content": "SECRET3"}]}
         original = {"model": "test", "input": [opaque, summary, tool, output, message], "tools": [{"parameters": {"properties": {"encrypted_content": {"type": "string"}}}}]}
         filtered, removed = filter_request(original)
-        self.assertEqual(removed, 3)
-        self.assertEqual(filtered["input"], [{k: v for k, v in summary.items() if k != "encrypted_content"}, tool, output,
-                                             {**message, "content": message["content"][:1]}])
+        self.assertEqual(removed, 2)
+        self.assertEqual(filtered["input"], [{k: v for k, v in summary.items() if k != "encrypted_content"}, tool, output, message])
         self.assertEqual(filtered["tools"], original["tools"])
         self.assertIn("encrypted_content", original["input"][0])
 
     def test_opaque_compaction_and_unknown_encryption_are_refused(self):
         for item in ({"type": "compaction", "encrypted_content": "SECRET"},
-                     {"type": "new_protocol", "encrypted_content": "SECRET"},
-                     {"type": "message", "content": [{"type": "encrypted_content", "encrypted_content": "SECRET"}]}):
+                     {"type": "new_protocol", "encrypted_content": "SECRET"}):
             with self.assertRaises(engine.RepairError):
                 filter_request({"input": [item]})
         with self.assertRaises(engine.RepairError):

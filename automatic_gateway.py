@@ -3,6 +3,7 @@ from collections import Counter, deque
 import copy
 import http.client
 import json
+import logging
 from pathlib import Path
 import threading
 import time
@@ -10,12 +11,13 @@ from urllib.parse import urlsplit
 
 import repair_encrypted_session as engine
 from provider_config import patch_provider, read_config, snapshot_fields, write_config
-from relay_transport import incoming_headers, open_response, send_response_body, send_response_headers, validate_network
+from relay_transport import ResponseObservation, incoming_headers, open_response, send_response_body, send_response_headers, validate_network
 from session_gateway import DROP, MAX_BODY, filter_input_item, upstream_url
 
 PREFIX = "/auto/v1"
 DETACHABLE = {"message", "reasoning", "function_call", "function_call_output",
               "custom_tool_call", "custom_tool_call_output", "compaction", "compaction_summary"}
+LOG = logging.getLogger("codex-session-repair.gateway")
 
 
 def clean_request(body, ids=True, encrypted=False):
@@ -172,14 +174,18 @@ class AutomaticGateway:
                 self.counters["types"][kind] = self.counters["types"].get(kind, 0) + number
             self.save()
 
-    def end(self, generation, counts, status, started, message=""):
+    def end(self, generation, counts, status, started, message="", details=None):
         with self.lock:
             self.active -= 1
+            event = {"time": time.time(), "ids": counts["ids"], "encrypted": counts["encrypted"],
+                     "status": status, "seconds": round(time.monotonic() - started, 2), "message": message,
+                     **(details or {})}
+            LOG.log(logging.WARNING if status >= 400 or message else logging.INFO,
+                    "%s", json.dumps(event, ensure_ascii=False, separators=(",", ":")))
             if generation != self.generation:
                 return
             self.counters["errors"] += int(status >= 400 or bool(message))
-            self.events.appendleft({"time": time.time(), "ids": counts["ids"], "encrypted": counts["encrypted"],
-                                    "status": status, "seconds": round(time.monotonic() - started, 2), "message": message})
+            self.events.appendleft(event)
             self.save()
 
     def relay(self, handler):
@@ -193,6 +199,9 @@ class AutomaticGateway:
         connection, sent = None, False
         counts = {"ids": 0, "encrypted": 0, "types": {}}
         status, message, started = 502, "", time.monotonic()
+        observation = None
+        details = {"path": suffix, "thread_id": "", "model": "", "upstream_request_id": "",
+                   "outcome": "connect_error", "failure_stage": "upstream_connect", "exception_class": ""}
         try:
             engine.require(settings["enabled"], "自动守护尚未接入，请在页面开启。")
             raw = None
@@ -204,6 +213,14 @@ class AutomaticGateway:
                 raw = handler.rfile.read(length)
                 engine.require(len(raw) == length, "请求体没有完整接收。")
                 body = json.loads(raw)
+                if isinstance(body, dict):
+                    from session_gateway import request_thread
+                    try:
+                        details["thread_id"] = request_thread(handler.headers, body) or ""
+                    except engine.RepairError:
+                        # Diagnostics must not reject otherwise valid automatic requests.
+                        pass
+                    details["model"] = ResponseObservation.identifier(body.get("model"))
                 filtered, counts = clean_request(body, settings["filter_ids"], settings["filter_encrypted"])
                 if filtered != body:
                     raw = json.dumps(filtered, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -213,20 +230,39 @@ class AutomaticGateway:
                 url += "?" + parsed.query
             connection, response = open_response(handler.command, url, incoming_headers(handler), raw, settings["network"])
             status = response.status
+            details["upstream_request_id"] = ResponseObservation.identifier(
+                response.getheader("x-request-id") or response.getheader("x-oneapi-request-id") or response.getheader("request-id"))
+            observation = ResponseObservation(response, handler.command == "POST" and suffix == "/responses" and body.get("stream") is True)
+            observation.failure_stage = "downstream_headers"
             send_response_headers(handler, response)
             sent = True
-            send_response_body(handler, response)
-        except (BrokenPipeError, ConnectionResetError):
-            message = "连接已中断"
+            send_response_body(handler, response, observation)
+            if status >= 400:
+                details["outcome"], message = "http_error", ""
+            else:
+                details["outcome"], message = observation.outcome()
+        except (BrokenPipeError, ConnectionResetError) as error:
+            details["exception_class"] = type(error).__name__
+            downstream = observation and observation.failure_stage.startswith("downstream")
+            details["outcome"] = "downstream_disconnect" if downstream else "upstream_disconnect"
+            message = "客户端连接已中断" if downstream else "上游连接已中断"
         except (engine.RepairError, ValueError) as error:
             status, message = 400, str(error) if isinstance(error, engine.RepairError) else "请求 JSON 或长度无效。"
+            details.update(outcome="invalid_request", failure_stage="request_validation", exception_class=type(error).__name__)
             if not sent:
                 handler.reject(message, status)
         except (OSError, http.client.HTTPException) as error:
-            status, message = 502, "上游连接失败：" + type(error).__name__
+            if not sent:
+                status = 502
+            downstream = observation and observation.failure_stage.startswith("downstream")
+            details.update(outcome="downstream_disconnect" if downstream else "upstream_disconnect",
+                           exception_class=type(error).__name__)
+            message = ("客户端连接失败：" if downstream else "上游连接失败：") + type(error).__name__
             if not sent:
                 handler.reject(message, status)
         finally:
             if connection:
                 connection.close()
-            self.end(generation, counts, status, started, message)
+            if observation:
+                details.update(observation.metadata())
+            self.end(generation, counts, status, started, message, details)

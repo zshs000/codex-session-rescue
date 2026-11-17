@@ -87,6 +87,7 @@ def request_thread(headers, body):
 
 
 def filter_input_item(item, counts):
+    """Remove reasoning state only; encrypted messages can carry agent tasks."""
     if not isinstance(item, dict):
         return item
     if item.get("encrypted_content"):
@@ -102,26 +103,13 @@ def filter_input_item(item, counts):
                 return DROP
             return result
         if kind == "encrypted_content" and set(item) == {"type", "encrypted_content"}:
-            counts["removed"] += 1
-            return DROP
+            return item
         if kind in {"compaction", "compaction_summary"}:
             raise engine.RepairError("请求依赖加密压缩记录，删除会丢失上下文；已停止转发。")
         raise engine.RepairError("发现尚不支持的加密输入结构，已停止转发。")
-    # Only visit protocol content, never tool arguments/results or user JSON text.
-    result = dict(item)
-    if isinstance(item.get("content"), list):
-        content = []
-        for child in item["content"]:
-            if isinstance(child, dict) and child.get("type") == "encrypted_content":
-                filtered = filter_input_item(child, counts)
-                if filtered is not DROP:
-                    content.append(filtered)
-            else:
-                content.append(child)
-        result["content"] = content
-        engine.require(content or item.get("type") != "message",
-                       "消息只包含加密内容，删除会丢失上下文；已停止转发。")
-    return result
+    # Agent task/reply bodies may be encrypted alongside a readable envelope.
+    # A remaining text prefix does not mean that the payload survived filtering.
+    return item
 
 
 def filter_request(body):
